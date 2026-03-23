@@ -1,0 +1,23 @@
+# hello_world/dts/bindings/nxp,pn7160.yaml
+
+description: NXP PN7160 NFC Controller
+
+compatible: "nxp,pn7160"
+
+include: spi-device.yaml
+
+properties:
+  irq-gpios:
+    type: phandle-array
+    required: true
+    description: Interrupt pin from PN7160 to Host (Input)
+
+  enable-gpios:
+    type: phandle-array
+    required: true
+    description: Enable/Reset pin from Host to PN7160 (Output)
+    
+  dwl-gpios:
+    type: phandle-array
+    required: true
+    description: Enable pin to Enter Download mode (Input)
