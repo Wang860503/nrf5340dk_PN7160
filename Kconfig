@@ -1,0 +1,17 @@
+# Copyright (c) 2025 Nordic Semiconductor ASA
+# SPDX-License-Identifier: Apache-2.0
+
+# Project Kconfig root; sources Zephyr menu.
+source "Kconfig.zephyr"
+
+menu "Shell Configuration"
+config SHELL_THREAD_PRIORITY
+	int "Shell thread priority"
+	default 0
+	range -15 15
+	help
+	  Priority of the shell thread. Lower numbers indicate higher priority.
+	  Default is 0 (normal priority). Use negative values for higher priority.
+	  For cooperative threads, use K_PRIO_COOP() macro values (typically 0-15).
+	  For preemptible threads, use K_PRIO_PREEMPT() macro values (typically -15 to -1).
+endmenu
