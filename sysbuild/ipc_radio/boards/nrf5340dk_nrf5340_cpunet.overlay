@@ -1,0 +1,14 @@
+/*
+ * CONFIG_SHELL_IPC requires zephyr,shell-ipc chosen (see nrf/subsys/shell/shell_ipc.c).
+ * App-core app.overlay does not apply to the ipc_radio child image.
+ */
+
+/ {
+	chosen {
+		zephyr,shell-ipc = &ipc0;
+	};
+};
+
+&uart0 {
+	status = "disabled";
+};

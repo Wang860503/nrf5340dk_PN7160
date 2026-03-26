@@ -30,6 +30,8 @@
 #include <zephyr/types.h>
 #include <zephyr/usb/usb_device.h>
 
+#include "shell_ipc_host.h"
+
 #if defined(NRF_RADIO)
 #include <hal/nrf_radio.h>
 #define PERIPHERAL_UART_HAS_RADIO_RESET 1
@@ -387,6 +389,12 @@ int peripheral_start(void) {
 
   /* 檢查藍牙是否已經啟用 */
   if (!bluetooth_enabled) {
+    /* Ensure IPC "remote shell" endpoint is registered with a dummy
+     * callback before enabling BT again. Otherwise HCI IPC endpoint
+     * binding might fail after remote_shell stop.
+     */
+    (void)shell_ipc_host_prebind();
+
     err = bt_enable(NULL);
     if (err && err != -EALREADY) {
       printk("Failed to enable Bluetooth (err: %d)\n", err);
@@ -466,20 +474,15 @@ int peripheral_stop(void) {
 
   /* 4. 完全關閉藍牙子系統 */
   if (bluetooth_enabled) {
-    err = bt_disable();
-    if (err && err != -EALREADY) {
-      printk("Failed to disable Bluetooth (err: %d)\n", err);
-      peripheral_stopping = false; /* 清除標記 */
-      return err;
-    }
-    if (err == -EALREADY) {
-      printk("Bluetooth already disabled\n");
-    } else {
-      printk("Bluetooth disabled successfully\n");
-    }
-    bluetooth_enabled = false;
-    peripheral_radio_reset();
-    k_sleep(K_MSEC(2000));
+    /* Keep Bluetooth enabled.
+     *
+     * bt_disable() tears down the HCI IPC service instance. With net core
+     * CONFIG_SHELL_IPC enabled, the "remote shell" endpoint may not re-bind
+     * after the session restart, which then makes the next bt_enable() fail
+     * with -11. For reliable start/stop cycles, we only stop advertising and
+     * disconnect here.
+     */
+    printk("Bluetooth kept enabled (no bt_disable)\n");
   }
 
   peripheral_initialized = false;
