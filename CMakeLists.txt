@@ -12,6 +12,7 @@ FILE(GLOB app_sources
     src/pn7160/TML/src/*.c
     src/pn7160/NfcLibrary_NCI2.0/NxpNci20/src/*.c
     src/pn7160/NfcLibrary_NCI2.0/NdefLibrary/src/*.c
+    src/peripheral_uart/*.c
 )
 
 target_include_directories(app PRIVATE
@@ -22,6 +23,7 @@ target_include_directories(app PRIVATE
     src/pn7160/NfcLibrary_NCI2.0/inc
     src/pn7160/NfcLibrary_NCI2.0/NxpNci20/inc
     src/pn7160/NfcLibrary_NCI2.0/NdefLibrary/inc
+    src/peripheral_uart/
 )
 
 target_sources(app PRIVATE 
