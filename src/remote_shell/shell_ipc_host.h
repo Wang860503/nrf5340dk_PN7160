@@ -37,7 +37,7 @@ int shell_ipc_host_init(shell_ipc_host_recv_cb cb, void* context);
 
 /**@brief Deinitializes the Shell over IPC service (best-effort).
  *
- * It deregisters the endpoint and closes the IPC instance.
+ * Deregisters the "remote shell" endpoint only (shared IPC instance may stay open).
  */
 int shell_ipc_host_deinit(void);
 

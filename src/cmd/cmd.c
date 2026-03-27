@@ -60,6 +60,10 @@ static int cmd_pn7160_test(const struct shell* sh, size_t argc, char** argv) {
 static int cmd_peripheral_uart(const struct shell* sh, size_t argc,
                                char** argv) {
   if (strcmp(argv[0], "start") == 0) {
+    if (k_sem_count_get(&peripheral_uart_sem) == 0) {
+      shell_warn(sh, "Peripheral already initialized and enabled");
+      return 0;
+    }
     peripheral_start();
   } else if (strcmp(argv[0], "stop") == 0) {
     if (k_sem_count_get(&peripheral_uart_sem) != 0) {
@@ -112,6 +116,7 @@ static int cmd_remote_shell(const struct shell* sh, size_t argc, char** argv) {
     shell_print(
         sh, "  start          - Bridge UART to network-core shell over IPC");
     shell_print(sh, "  stop           - Stop remote shell");
+    shell_print(sh, "  (on net:~$)    - Back: Ctrl+A then Ctrl+X on UART");
     return -EINVAL;
   }
   return 0;

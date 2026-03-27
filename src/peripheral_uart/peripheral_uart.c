@@ -29,8 +29,9 @@
 #include <zephyr/settings/settings.h>
 #include <zephyr/types.h>
 #include <zephyr/usb/usb_device.h>
-
-#include "shell_ipc_host.h"
+#if defined(CONFIG_SOC_NRF53_CPUNET_MGMT)
+#include <nrf53_cpunet_mgmt.h>
+#endif
 
 #if defined(NRF_RADIO)
 #include <hal/nrf_radio.h>
@@ -78,6 +79,16 @@ static void peripheral_radio_reset(void) {
 
   /* Disable radio IRQ */
   irq_disable(PERIPHERAL_RADIO_IRQn);
+#endif
+}
+
+static void peripheral_cpunet_restart(void) {
+#if defined(CONFIG_SOC_NRF53_CPUNET_MGMT)
+  nrf53_cpunet_enable(false);
+  k_sleep(K_MSEC(100));
+  nrf53_cpunet_enable(true);
+  /* Wait until net core boots and recreates IPC endpoints. */
+  k_sleep(K_MSEC(600));
 #endif
 }
 
@@ -157,6 +168,14 @@ static void adv_work_handler(struct k_work* work) {
                             ARRAY_SIZE(sd));
 
   if (err) {
+    /* -EAGAIN can happen if start is requested too soon after stop. */
+    if (err == -EAGAIN) {
+      LOG_WRN("Advertising start busy, retrying...");
+      k_sleep(K_MSEC(200));
+      k_work_submit(&adv_work);
+      return;
+    }
+
     LOG_ERR("Advertising failed to start (err %d)", err);
     return;
   }
@@ -361,11 +380,6 @@ int peripheral_start(void) {
 
   /* 如果已經初始化，檢查 semaphore 狀態 */
   if (peripheral_initialized) {
-    /* 如果 semaphore 值為 0，表示已啟用，不需要再次 take */
-    if (k_sem_count_get(&peripheral_uart_sem) == 0) {
-      printk("Peripheral already initialized and enabled\n");
-      return 0;
-    }
     /* 如果 semaphore 值為 1，表示未啟用，需要重新初始化 */
     printk("Peripheral initialized but not enabled, reinitializing...\n");
     peripheral_stop();
@@ -389,12 +403,6 @@ int peripheral_start(void) {
 
   /* 檢查藍牙是否已經啟用 */
   if (!bluetooth_enabled) {
-    /* Ensure IPC "remote shell" endpoint is registered with a dummy
-     * callback before enabling BT again. Otherwise HCI IPC endpoint
-     * binding might fail after remote_shell stop.
-     */
-    (void)shell_ipc_host_prebind();
-
     err = bt_enable(NULL);
     if (err && err != -EALREADY) {
       printk("Failed to enable Bluetooth (err: %d)\n", err);
@@ -406,6 +414,7 @@ int peripheral_start(void) {
       printk("Bluetooth initialized\n");
     }
     bluetooth_enabled = true;
+
   } else {
     printk("Bluetooth already enabled\n");
   }
@@ -445,16 +454,6 @@ int peripheral_stop(void) {
   /* 設置停止標記，防止回調中重新啟動廣告 */
   peripheral_stopping = true;
 
-  /* 1. 先停止廣播 (Advertising) */
-  err = bt_le_adv_stop();
-  if (err && err != -EALREADY) {
-    printk("Failed to stop advertising (err: %d)\n", err);
-    /* 這裡不 return，繼續嘗試斷線與關閉藍牙 */
-  } else {
-    printk("Advertising stopped\n");
-  }
-
-  /* 2. 如果目前有手機連線，主動斷開它 */
   if (current_conn) {
     err = bt_conn_disconnect(current_conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
     if (err) {
@@ -466,23 +465,28 @@ int peripheral_stop(void) {
     k_sleep(K_MSEC(200));
   }
 
+  err = bt_le_adv_stop();
+  if (err && err != -EALREADY) {
+    printk("Failed to stop advertising (err: %d)\n", err);
+    /* 這裡不 return，繼續嘗試斷線與關閉藍牙 */
+  } else {
+    printk("Advertising stopped\n");
+  }
+
   /* 3. 再次確保廣告已停止（防止回調中重新啟動） */
   err = bt_le_adv_stop();
   if (err && err != -EALREADY) {
     /* 忽略錯誤，繼續執行 */
   }
 
-  /* 4. 完全關閉藍牙子系統 */
+  /* 4. 不走 bt_disable，直接重啟 net core 釋放 HCI/IPC 狀態 */
   if (bluetooth_enabled) {
-    /* Keep Bluetooth enabled.
-     *
-     * bt_disable() tears down the HCI IPC service instance. With net core
-     * CONFIG_SHELL_IPC enabled, the "remote shell" endpoint may not re-bind
-     * after the session restart, which then makes the next bt_enable() fail
-     * with -11. For reliable start/stop cycles, we only stop advertising and
-     * disconnect here.
-     */
-    printk("Bluetooth kept enabled (no bt_disable)\n");
+    printk("Restarting net core...\n");
+    peripheral_cpunet_restart();
+    printk("Net core restarted\n");
+    bluetooth_enabled = false;
+    peripheral_radio_reset();
+    k_sleep(K_MSEC(300));
   }
 
   peripheral_initialized = false;
@@ -493,6 +497,15 @@ int peripheral_stop(void) {
   }
 
   return 0;
+}
+
+int peripheral_bt_disable(void) {
+  int err = 0;
+
+  /* Stop adv + disconnect first */
+  (void)peripheral_stop();
+
+  return err;
 }
 
 void ble_write_thread(void) {

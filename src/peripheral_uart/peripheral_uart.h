@@ -5,5 +5,6 @@ extern struct k_sem peripheral_uart_sem;
 
 int peripheral_start(void);
 int peripheral_stop(void);
+int peripheral_bt_disable(void);
 
 #endif
