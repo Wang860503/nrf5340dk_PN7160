@@ -14,7 +14,8 @@ The IPC radio firmware allows to use the radio peripheral from another core in a
 Position
 ********************
 Windows:
-C:\ncs\v3.1.1\nrf\applications\ipc_radio
+
+C:\\ncs\\v3.1.1\\nrf\\applications\\ipc_radio
 
 Application overview
 ********************
