@@ -1,44 +1,200 @@
 /*
- * Copyright (c) 2012-2014 Wind River Systems, Inc.
+ * Copyright (c) 2023 Nordic Semiconductor ASA
  *
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
  */
 
-#include <stdio.h>
-#include <zephyr/kernel.h>
+#include <errno.h>
+#include <zephyr/drivers/clock_control.h>
+#include <zephyr/drivers/clock_control/nrf_clock_control.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/printk.h>
 
-LOG_MODULE_REGISTER(senao_app);
-
-#ifdef CONFIG_SHELL_THREAD_PRIORITY
-/* 回調函數用於查找 shell 線程 */
-static void find_shell_thread_cb(const struct k_thread* thread,
-                                 void* user_data) {
-  const char* thread_name = k_thread_name_get((k_tid_t)thread);
-  if (thread_name != NULL && strcmp(thread_name, "shell_uart") == 0) {
-    k_tid_t* found_tid = (k_tid_t*)user_data;
-    *found_tid = (k_tid_t)thread;
-  }
-}
+#include "ipc_bt.h"
+#if defined(NRF54L15_XXAA)
+#include <hal/nrf_clock.h>
+#endif /* defined(NRF54L15_XXAA) */
+#if defined(CONFIG_CLOCK_CONTROL_NRF2)
+#include <hal/nrf_lrcconf.h>
 #endif
+#include <nrf_erratas.h>
+#if NRF54L_ERRATA_20_PRESENT
+#include <hal/nrf_power.h>
+#endif /* NRF54L_ERRATA_20_PRESENT */
+#if defined(NRF54LM20A_ENGA_XXAA)
+#include <hal/nrf_clock.h>
+#endif /* defined(NRF54LM20A_ENGA_XXAA) */
+
+LOG_MODULE_REGISTER(ipc_radio, CONFIG_IPC_RADIO_LOG_LEVEL);
+
+#if !(CONFIG_IPC_RADIO_802154 || CONFIG_IPC_RADIO_BT)
+#error "No radio serialization selected."
+#endif
+
+/* Empty trim value */
+#define TRIM_VALUE_EMPTY 0xFFFFFFFF
+
+#if defined(CONFIG_CLOCK_CONTROL_NRF)
+static void clock_init(void) {
+  int err;
+  int res;
+  struct onoff_manager* clk_mgr;
+  struct onoff_client clk_cli;
+
+  clk_mgr = z_nrf_clock_control_get_onoff(CLOCK_CONTROL_NRF_SUBSYS_HF);
+  if (!clk_mgr) {
+    printk("Unable to get the Clock manager\n");
+    return;
+  }
+
+  sys_notify_init_spinwait(&clk_cli.notify);
+
+  err = onoff_request(clk_mgr, &clk_cli);
+  if (err < 0) {
+    printk("Clock request failed: %d\n", err);
+    return;
+  }
+
+  do {
+    err = sys_notify_fetch_result(&clk_cli.notify, &res);
+    if (!err && res) {
+      printk("Clock could not be started: %d\n", res);
+      return;
+    }
+  } while (err);
+
+#if NRF54L_ERRATA_20_PRESENT
+  if (nrf54l_errata_20()) {
+    nrf_power_task_trigger(NRF_POWER, NRF_POWER_TASK_CONSTLAT);
+  }
+#endif /* NRF54L_ERRATA_20_PRESENT */
+
+#if defined(NRF54LM20A_ENGA_XXAA)
+  /* MLTPAN-39 */
+  nrf_clock_task_trigger(NRF_CLOCK, NRF_CLOCK_TASK_PLLSTART);
+#endif /* defined(NRF54LM20A_ENGA_XXAA) */
+
+  printk("Clock has started\n");
+}
+
+#elif defined(CONFIG_CLOCK_CONTROL_NRF2)
+
+static void clock_init(void) {
+  int err;
+  int res;
+  const struct device* radio_clk_dev =
+      DEVICE_DT_GET_OR_NULL(DT_CLOCKS_CTLR(DT_NODELABEL(radio)));
+  struct onoff_client radio_cli;
+
+  /** Keep radio domain powered all the time to reduce latency. */
+  nrf_lrcconf_poweron_force_set(NRF_LRCCONF010, NRF_LRCCONF_POWER_DOMAIN_1,
+                                true);
+
+  sys_notify_init_spinwait(&radio_cli.notify);
+
+  err = nrf_clock_control_request(radio_clk_dev, NULL, &radio_cli);
+
+  do {
+    err = sys_notify_fetch_result(&radio_cli.notify, &res);
+    if (!err && res) {
+      printk("Clock could not be started: %d\n", res);
+      return;
+    }
+  } while (err == -EAGAIN);
+
+#if NRF54L_ERRATA_20_PRESENT
+  if (nrf54l_errata_20()) {
+    nrf_power_task_trigger(NRF_POWER, NRF_POWER_TASK_CONSTLAT);
+  }
+#endif /* NRF54L_ERRATA_20_PRESENT */
+
+  printk("Clock has started\n");
+}
+
+#if defined(CONFIG_SOC_SERIES_NRF54HX)
+static void nrf54hx_radio_trim(void) {
+  /* Apply HMPAN-102 workaround for nRF54H series */
+  *(volatile uint32_t*)0x5302C7E4 =
+      (((*((volatile uint32_t*)0x5302C7E4)) & 0xFF000FFF) | 0x0012C000);
+
+  /* Apply HMPAN-18 workaround for nRF54H series - load trim values*/
+  if (*(volatile uint32_t*)0x0FFFE458 != TRIM_VALUE_EMPTY) {
+    *(volatile uint32_t*)0x5302C734 = *(volatile uint32_t*)0x0FFFE458;
+  }
+
+  if (*(volatile uint32_t*)0x0FFFE45C != TRIM_VALUE_EMPTY) {
+    *(volatile uint32_t*)0x5302C738 = *(volatile uint32_t*)0x0FFFE45C;
+  }
+
+  if (*(volatile uint32_t*)0x0FFFE460 != TRIM_VALUE_EMPTY) {
+    *(volatile uint32_t*)0x5302C73C = *(volatile uint32_t*)0x0FFFE460;
+  }
+
+  if (*(volatile uint32_t*)0x0FFFE464 != TRIM_VALUE_EMPTY) {
+    *(volatile uint32_t*)0x5302C740 = *(volatile uint32_t*)0x0FFFE464;
+  }
+
+  if (*(volatile uint32_t*)0x0FFFE468 != TRIM_VALUE_EMPTY) {
+    *(volatile uint32_t*)0x5302C74C = *(volatile uint32_t*)0x0FFFE468;
+  }
+
+  if (*(volatile uint32_t*)0x0FFFE46C != TRIM_VALUE_EMPTY) {
+    *(volatile uint32_t*)0x5302C7D8 = *(volatile uint32_t*)0x0FFFE46C;
+  }
+
+  if (*(volatile uint32_t*)0x0FFFE470 != TRIM_VALUE_EMPTY) {
+    *(volatile uint32_t*)0x5302C840 = *(volatile uint32_t*)0x0FFFE470;
+  }
+
+  if (*(volatile uint32_t*)0x0FFFE474 != TRIM_VALUE_EMPTY) {
+    *(volatile uint32_t*)0x5302C844 = *(volatile uint32_t*)0x0FFFE474;
+  }
+
+  if (*(volatile uint32_t*)0x0FFFE478 != TRIM_VALUE_EMPTY) {
+    *(volatile uint32_t*)0x5302C848 = *(volatile uint32_t*)0x0FFFE478;
+  }
+
+  if (*(volatile uint32_t*)0x0FFFE47C != TRIM_VALUE_EMPTY) {
+    *(volatile uint32_t*)0x5302C84C = *(volatile uint32_t*)0x0FFFE47C;
+  }
+
+  /* Apply HMPAN-103 workaround for nRF54H series*/
+  if ((*(volatile uint32_t*)0x5302C8A0 == 0x80000000) ||
+      (*(volatile uint32_t*)0x5302C8A0 == 0x0058120E)) {
+    *(volatile uint32_t*)0x5302C8A0 = 0x0058090E;
+  }
+
+  *(volatile uint32_t*)0x5302C8A4 = 0x00F8AA5F;
+  *(volatile uint32_t*)0x5302C7AC = 0x8672827A;
+  *(volatile uint32_t*)0x5302C7B0 = 0x7E768672;
+  *(volatile uint32_t*)0x5302C7B4 = 0x0406007E;
+}
+#endif /* defined(CONFIG_SOC_SERIES_NRF54HX) */
+
+#else
+BUILD_ASSERT(false, "No Clock Control driver");
+#endif /* defined(CONFIG_CLOCK_CONTROL_NRF) */
 
 int main(void) {
-#ifdef CONFIG_SHELL_THREAD_PRIORITY
-  k_tid_t shell_tid = NULL;
-  /* 使用 k_thread_foreach 遍歷所有線程查找 shell 線程 */
-  k_thread_foreach(find_shell_thread_cb, &shell_tid);
+  int err;
 
-  if (shell_tid != NULL) {
-    k_thread_priority_set(shell_tid, CONFIG_SHELL_THREAD_PRIORITY);
-    printk("Shell thread priority set to %d\n", CONFIG_SHELL_THREAD_PRIORITY);
-  } else {
-    printk("Warning: Shell thread not found, priority not set\n");
+  clock_init();
+
+  err = ipc_bt_init();
+  if ((err) && (err != -ENOSYS)) {
+    LOG_ERR("Error initializing ipc radio %d", err);
+    return err;
   }
-#endif
 
-  printk("Senao Shell ready. Type 'help' for commands.\n");
+  for (;;) {
+    err = ipc_bt_process();
 
-  k_sleep(K_FOREVER);
-
-  return 0;
+    if (err == -ENOSYS) {
+      /* Particular implementation does not need the process function */
+      return 0;
+    } else if (err) {
+      LOG_ERR("Error processing ipc radio %d", err);
+      return err;
+    }
+  }
 }
